@@ -62,6 +62,41 @@ def get_employee_type(name: str) -> str:
 def is_weekend(date_value) -> bool:
     return pd.Timestamp(date_value).weekday() >= 5
 
+def build_fund_df(source_df: pd.DataFrame, employees_df: pd.DataFrame, start_dt: datetime) -> pd.DataFrame:
+    hours_summary = source_df.groupby("employee", as_index=False)["hours"].sum().rename(columns={"hours": "planned_hours"})
+    next_month = (start_dt.replace(day=28) + timedelta(days=4)).replace(day=1)
+
+    rows = []
+    for emp in employees_df["name"]:
+        weekly_hours = get_weekly_hours(emp)
+
+        planned = hours_summary.loc[hours_summary["employee"] == emp, "planned_hours"]
+        planned = float(planned.iloc[0]) if not planned.empty else 0.0
+
+        fund_month_1 = monthly_fund_hours(start_dt.year, start_dt.month, weekly_hours)
+        fund_month_2 = monthly_fund_hours(next_month.year, next_month.month, weekly_hours)
+        target_fund = round(fund_month_1 + fund_month_2, 1)
+
+        difference = round(target_fund - planned, 1)
+
+        if difference > 20:
+            status = "Pod fondom"
+        elif difference < -20:
+            status = "Nad fondom"
+        else:
+            status = "V norme"
+
+        rows.append({
+            "employee": emp,
+            "employee_type": get_employee_type(emp),
+            "planned_hours": planned,
+            "target_fund_hours": target_fund,
+            "difference": difference,
+            "status": status
+        })
+
+    return pd.DataFrame(rows)
+
 # ---------------------------
 # DÁTA
 # ---------------------------
@@ -97,7 +132,6 @@ employees = pd.DataFrame(employees)
 # ---------------------------
 # GENEROVANIE SMIEN
 # denne: 2 FT, 2 PT, 2 BR
-# prevádzka otvorená každý deň
 # ---------------------------
 shifts = []
 
@@ -162,8 +196,8 @@ st.sidebar.header("Nastavenia")
 
 selected_groups = st.sidebar.multiselect(
     "Zobraziť typy smien",
-    ["Fulltime", "Parttime", "Brigádnik ráno", "Brigádnik večer"],
-    default=["Fulltime", "Parttime", "Brigádnik ráno", "Brigádnik večer"]
+    ["Fulltime", "Parttime", "Brigádnik ráno", "Brigádnik večer", "Náhrada"],
+    default=["Fulltime", "Parttime", "Brigádnik ráno", "Brigádnik večer", "Náhrada"]
 )
 
 show_weekends_only = st.sidebar.checkbox("Zobraziť len víkendy", value=False)
@@ -174,36 +208,57 @@ selected_employee = st.sidebar.selectbox(
     ["Nikto"] + employee_options
 )
 
-selected_absence_date = st.sidebar.date_input(
-    "Dátum výpadku",
+absence_start_date = st.sidebar.date_input(
+    "Začiatok výpadku",
     start_date.date()
 )
+
+absence_days = st.sidebar.slider(
+    "Počet dní výpadku",
+    min_value=1,
+    max_value=14,
+    value=1
+)
+
+absence_end_date = absence_start_date + timedelta(days=absence_days - 1)
+st.sidebar.caption(f"Výpadok bude od {absence_start_date} do {absence_end_date}")
 
 # ---------------------------
 # FILTER
 # ---------------------------
-filtered_df = df[df["group"].isin(selected_groups)].copy()
+filtered_df = df.copy()
 
 if show_weekends_only:
     filtered_df = filtered_df[filtered_df["day_type"] == "Víkend"].copy()
 
 # ---------------------------
-# SIMULÁCIA VÝPADKU + NÁHRADA
+# SIMULÁCIA VÝPADKU + NÁHRADY
 # ---------------------------
-absence_info = None
-replacement_table = pd.DataFrame()
+replacement_rows = []
+absence_messages = []
 
 if selected_employee != "Nikto":
-    missing_mask = (
-        (filtered_df["employee"] == selected_employee) &
-        (filtered_df["date"] == selected_absence_date)
-    )
+    absence_dates = [absence_start_date + timedelta(days=i) for i in range(absence_days)]
 
-    missing_shift_df = filtered_df[missing_mask]
+    for current_absence_date in absence_dates:
+        day_mask = (
+            (filtered_df["employee"] == selected_employee) &
+            (filtered_df["date"] == current_absence_date)
+        )
 
-    if not missing_shift_df.empty:
+        missing_shift_df = filtered_df[day_mask]
+
+        if missing_shift_df.empty:
+            absence_messages.append({
+                "date": current_absence_date,
+                "missing_employee": selected_employee,
+                "replacement": "Bez smeny",
+                "status": "V tento deň nemal smenu"
+            })
+            continue
+
         missing_shift = missing_shift_df.iloc[0]
-        filtered_df = filtered_df[~missing_mask].copy()
+        filtered_df = filtered_df[~day_mask].copy()
 
         missing_group = missing_shift["group"]
         missing_hours = missing_shift["hours"]
@@ -215,7 +270,7 @@ if selected_employee != "Nikto":
         else:
             allowed_candidate_types = ["Brigádnik", "Parttime"]
 
-        used_today = set(df[df["date"] == selected_absence_date]["employee"].tolist())
+        used_today = set(filtered_df[filtered_df["date"] == current_absence_date]["employee"].tolist())
         used_today.discard(selected_employee)
 
         candidates = employees.copy()
@@ -223,8 +278,9 @@ if selected_employee != "Nikto":
 
         candidates["candidate_type"] = candidates["name"].apply(get_employee_type)
         candidates = candidates[candidates["candidate_type"].isin(allowed_candidate_types)].copy()
+        candidates = candidates[candidates["name"] != selected_employee].copy()
 
-        planned_hours = df.groupby("employee", as_index=False)["hours"].sum()
+        planned_hours = filtered_df.groupby("employee", as_index=False)["hours"].sum()
         planned_hours = planned_hours.rename(columns={"hours": "planned_hours"})
 
         candidates = candidates.merge(
@@ -236,12 +292,13 @@ if selected_employee != "Nikto":
         candidates["planned_hours"] = candidates["planned_hours"].fillna(0)
 
         candidates["current_month_fund"] = candidates["weekly_hours"].apply(
-            lambda wh: monthly_fund_hours(selected_absence_date.year, selected_absence_date.month, wh)
+            lambda wh: monthly_fund_hours(current_absence_date.year, current_absence_date.month, wh)
         )
         candidates["fund_gap"] = candidates["current_month_fund"] - candidates["planned_hours"]
 
+        original_type = get_employee_type(selected_employee)
         candidates["priority_score"] = candidates.apply(
-            lambda row: 2 if row["candidate_type"] == get_employee_type(selected_employee) else 1,
+            lambda row: 2 if row["candidate_type"] == original_type else 1,
             axis=1
         )
 
@@ -252,8 +309,8 @@ if selected_employee != "Nikto":
 
         if not candidates.empty:
             top_candidates = candidates[["name", "candidate_type", "planned_hours", "current_month_fund", "fund_gap"]].head(3).copy()
-            top_candidates.columns = ["Zamestnanec", "Typ", "Naplánované hodiny", "Mesačný fond", "Rezerva do fondu"]
-            replacement_table = top_candidates
+            top_candidates["date"] = current_absence_date
+            replacement_rows.append(top_candidates)
 
             replacement = candidates.iloc[0]["name"]
 
@@ -261,28 +318,31 @@ if selected_employee != "Nikto":
                 filtered_df,
                 pd.DataFrame([{
                     "employee": replacement,
-                    "date": selected_absence_date,
+                    "date": current_absence_date,
                     "start": missing_shift["start"],
                     "end": missing_shift["end"],
                     "group": "Náhrada",
                     "hours": missing_hours,
-                    "day_type": "Víkend" if pd.Timestamp(selected_absence_date).weekday() >= 5 else "Pracovný deň"
+                    "day_type": "Víkend" if pd.Timestamp(current_absence_date).weekday() >= 5 else "Pracovný deň"
                 }])
             ], ignore_index=True)
 
-            absence_info = {
+            absence_messages.append({
+                "date": current_absence_date,
                 "missing_employee": selected_employee,
                 "replacement": replacement,
-                "date": selected_absence_date,
-                "hours": missing_hours
-            }
+                "status": "Nahradené"
+            })
         else:
-            absence_info = {
+            absence_messages.append({
+                "date": current_absence_date,
                 "missing_employee": selected_employee,
                 "replacement": "Nenašla sa náhrada",
-                "date": selected_absence_date,
-                "hours": missing_hours
-            }
+                "status": "Nepokryté"
+            })
+
+# Po simulácii až aplikuj filter skupín
+filtered_df = filtered_df[filtered_df["group"].isin(selected_groups)].copy()
 
 # ---------------------------
 # KPI
@@ -299,21 +359,63 @@ col2.metric("Naplánované hodiny", total_hours)
 col3.metric("Nasadení ľudia", scheduled_people)
 col4.metric("Víkendové smeny", weekend_shifts)
 
-if absence_info:
-    if absence_info["replacement"] != "Nenašla sa náhrada":
-        st.success(
-            f"Výpadok zamestnanca {absence_info['missing_employee']} dňa {absence_info['date']} "
-            f"bol pokrytý náhradou: {absence_info['replacement']}."
-        )
-    else:
-        st.error(
-            f"Pre výpadok zamestnanca {absence_info['missing_employee']} dňa {absence_info['date']} "
-            f"sa nenašla vhodná náhrada."
-        )
+# ---------------------------
+# INFO O VÝPADKU
+# ---------------------------
+if absence_messages:
+    absence_df = pd.DataFrame(absence_messages)
 
-if not replacement_table.empty:
-    st.subheader("Top 3 odporúčaní náhradníci")
+    covered_count = len(absence_df[absence_df["status"] == "Nahradené"])
+    uncovered_count = len(absence_df[absence_df["status"] == "Nepokryté"])
+
+    if covered_count > 0:
+        st.success(f"Nahradené dni výpadku: {covered_count}")
+
+    if uncovered_count > 0:
+        st.error(f"Nepokryté dni výpadku: {uncovered_count}")
+
+    st.subheader("Prehľad výpadku a náhrad")
+    st.dataframe(absence_df, use_container_width=True)
+
+if replacement_rows:
+    replacement_table = pd.concat(replacement_rows, ignore_index=True)
+    replacement_table = replacement_table.rename(columns={
+        "name": "Zamestnanec",
+        "candidate_type": "Typ",
+        "planned_hours": "Naplánované hodiny",
+        "current_month_fund": "Mesačný fond",
+        "fund_gap": "Rezerva do fondu",
+        "date": "Dátum"
+    })
+    st.subheader("Top odporúčaní náhradníci podľa dní")
     st.dataframe(replacement_table, use_container_width=True)
+
+# ---------------------------
+# ALERTY FONDU HODÍN
+# ---------------------------
+fund_df = build_fund_df(filtered_df, employees, start_date)
+
+underfund_df = fund_df[fund_df["status"] == "Pod fondom"].copy()
+overfund_df = fund_df[fund_df["status"] == "Nad fondom"].copy()
+
+alert_col1, alert_col2, alert_col3 = st.columns(3)
+alert_col1.metric("Ľudia pod fondom", len(underfund_df))
+alert_col2.metric("Ľudia nad fondom", len(overfund_df))
+alert_col3.metric("Ľudia v norme", len(fund_df[fund_df["status"] == "V norme"]))
+
+if len(underfund_df) > 0:
+    st.warning("Niektorí zamestnanci sú pod plánovaným fondom hodín.")
+    st.dataframe(
+        underfund_df[["employee", "employee_type", "planned_hours", "target_fund_hours", "difference", "status"]],
+        use_container_width=True
+    )
+
+if len(overfund_df) > 0:
+    st.error("Niektorí zamestnanci sú nad plánovaným fondom hodín.")
+    st.dataframe(
+        overfund_df[["employee", "employee_type", "planned_hours", "target_fund_hours", "difference", "status"]],
+        use_container_width=True
+    )
 
 # ---------------------------
 # KALENDÁR SMIEN
@@ -372,32 +474,6 @@ st.plotly_chart(fig, use_container_width=True)
 # PREHĽAD FONDU HODÍN
 # ---------------------------
 st.subheader("Fond hodín – 2-mesačný prehľad")
-
-hours_summary = df.groupby("employee", as_index=False)["hours"].sum().rename(columns={"hours": "planned_hours"})
-
-next_month = (start_date.replace(day=28) + timedelta(days=4)).replace(day=1)
-
-employee_funds = []
-for emp in employees["name"]:
-    weekly_hours = get_weekly_hours(emp)
-
-    planned = hours_summary.loc[hours_summary["employee"] == emp, "planned_hours"]
-    planned = float(planned.iloc[0]) if not planned.empty else 0.0
-
-    fund_month_1 = monthly_fund_hours(start_date.year, start_date.month, weekly_hours)
-    fund_month_2 = monthly_fund_hours(next_month.year, next_month.month, weekly_hours)
-    target_fund = round(fund_month_1 + fund_month_2, 1)
-
-    employee_funds.append({
-        "employee": emp,
-        "employee_type": get_employee_type(emp),
-        "planned_hours": planned,
-        "target_fund_hours": target_fund,
-        "difference": round(target_fund - planned, 1)
-    })
-
-fund_df = pd.DataFrame(employee_funds)
-
 st.dataframe(
     fund_df.sort_values(["employee_type", "employee"]),
     use_container_width=True
