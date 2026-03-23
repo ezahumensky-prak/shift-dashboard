@@ -52,7 +52,10 @@ def month_start_end(year: int, month: int):
 def get_weekly_hours(name: str) -> int:
     if name.startswith("FT"):
         return 36
-    return 18
+    elif name.startswith("PT"):
+        return 18
+    else:  # BR
+        return 16
 
 def monthly_fund_hours(year: int, month: int, weekly_hours: float) -> float:
     weeks_in_month = calendar.monthcalendar(year, month)
