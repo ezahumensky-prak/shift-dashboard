@@ -35,7 +35,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("Supervisor Shift Planner")
-st.caption("Plán smien od februára do augusta, mesačný fond hodín 36h/týždeň a náhrady pri výpadku")
+st.caption("Plán smien od februára do augusta, mesačný fond hodín a náhrady pri výpadku")
 
 DEFAULT_YEAR = 2026
 MONTHS_TO_PLAN = [2, 3, 4, 5, 6, 7, 8]
@@ -49,14 +49,16 @@ def month_start_end(year: int, month: int):
     last_day = calendar.monthrange(year, month)[1]
     return date(year, month, 1), date(year, month, last_day)
 
-def monthly_fund_hours(year: int, month: int, weekly_hours: float = 36.0) -> float:
+def get_weekly_hours(name: str) -> int:
+    if name.startswith("FT"):
+        return 36
+    return 18
+
+def monthly_fund_hours(year: int, month: int, weekly_hours: float) -> float:
     weeks_in_month = calendar.monthcalendar(year, month)
     weekday_count = sum(1 for week in weeks_in_month for day in week[:5] if day != 0)
     daily_hours = weekly_hours / 5
     return round(weekday_count * daily_hours, 1)
-
-def get_weekly_hours(name: str) -> int:
-    return 36
 
 def get_employee_type(name: str) -> str:
     if name.startswith("FT"):
@@ -126,14 +128,14 @@ for i in range(4):
     employees.append({
         "name": f"PT_{i+1}",
         "employee_type": "Parttime",
-        "weekly_hours": 36
+        "weekly_hours": 18
     })
 
 for i in range(4):
     employees.append({
         "name": f"BR_{i+1}",
         "employee_type": "Brigádnik",
-        "weekly_hours": 36
+        "weekly_hours": 18
     })
 
 employees = pd.DataFrame(employees)
@@ -310,6 +312,7 @@ if selected_employees:
             for _, row in candidates.iterrows():
                 c_name = row["name"]
                 c_type = row["candidate_type"]
+                c_wh = get_weekly_hours(c_name)
 
                 planned_match = filtered_df[
                     (filtered_df["employee"] == c_name) &
@@ -317,7 +320,7 @@ if selected_employees:
                     (filtered_df["month"] == current_absence_date.month)
                 ]["hours"].sum()
 
-                month_fund = monthly_fund_hours(current_absence_date.year, current_absence_date.month, 36)
+                month_fund = monthly_fund_hours(current_absence_date.year, current_absence_date.month, c_wh)
                 fund_gap = month_fund - planned_match
                 priority_score = 2 if c_type == get_employee_type(selected_employee) else 1
 
@@ -424,15 +427,6 @@ st.subheader("Mesačné alerty fondu hodín")
 month_alerts = fund_df.groupby(["month_name", "status"], as_index=False).size().rename(columns={"size": "count"})
 st.dataframe(month_alerts, use_container_width=True)
 
-underfund_df = fund_df[fund_df["status"] == "Pod fondom"].copy()
-overfund_df = fund_df[fund_df["status"] == "Nad fondom"].copy()
-normal_df = fund_df[fund_df["status"] == "V norme"].copy()
-
-alert_col1, alert_col2, alert_col3 = st.columns(3)
-alert_col1.metric("Mesačné riadky pod fondom", len(underfund_df))
-alert_col2.metric("Mesačné riadky nad fondom", len(overfund_df))
-alert_col3.metric("Mesačné riadky v norme", len(normal_df))
-
 st.subheader("Kalendár smien")
 
 employee_colors = {
@@ -484,46 +478,3 @@ st.dataframe(
     fund_df.sort_values(["month", "employee_type", "employee"]),
     use_container_width=True
 )
-
-st.subheader("Porovnanie naplánovaných hodín a mesačného fondu")
-
-chart_month_options = [MONTH_NAME_SK[m] for m in selected_month_numbers] if selected_month_numbers else [MONTH_NAME_SK[m] for m in MONTHS_TO_PLAN]
-selected_month_for_chart = st.selectbox(
-    "Mesiac pre porovnanie fondu",
-    chart_month_options
-)
-
-selected_chart_month_number = [k for k, v in MONTH_NAME_SK.items() if v == selected_month_for_chart][0]
-chart_df = fund_df[fund_df["month"] == selected_chart_month_number].copy()
-
-fund_chart = px.bar(
-    chart_df.sort_values(["employee_type", "employee"]),
-    x="employee",
-    y=["planned_hours", "target_fund_hours"],
-    barmode="group",
-    title=f"Porovnanie hodín – {selected_month_for_chart} {selected_year}",
-    color_discrete_sequence=["#60a5fa", "#f59e0b"]
-)
-
-fund_chart.update_layout(
-    paper_bgcolor="#11182d",
-    plot_bgcolor="#11182d",
-    font=dict(color="white"),
-    height=520,
-    xaxis_title="Zamestnanec",
-    yaxis_title="Hodiny",
-    margin=dict(l=20, r=20, t=60, b=20)
-)
-
-st.plotly_chart(fund_chart, use_container_width=True)
-
-st.subheader("Súhrn podľa typu pracovníka a mesiaca")
-
-summary_by_type = fund_df.groupby(["month_name", "employee_type"], as_index=False).agg(
-    planned_hours=("planned_hours", "sum"),
-    target_fund_hours=("target_fund_hours", "sum"),
-    employee_count=("employee", "count")
-)
-summary_by_type["difference"] = summary_by_type["target_fund_hours"] - summary_by_type["planned_hours"]
-
-st.dataframe(summary_by_type, use_container_width=True)
