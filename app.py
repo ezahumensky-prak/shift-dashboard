@@ -189,7 +189,6 @@ if show_weekends_only:
 
 # ---------------------------
 # SIMULÁCIA VÝPADKU + NÁHRADA
-# simulácia = iba v appke prepočíta kalendár, nič sa trvalo neukladá
 # ---------------------------
 absence_info = None
 replacement_table = pd.DataFrame()
@@ -321,20 +320,37 @@ if not replacement_table.empty:
 # ---------------------------
 st.subheader("Kalendár smien")
 
+employee_colors = {
+    "FT_1": "#60a5fa",
+    "FT_2": "#3b82f6",
+    "FT_3": "#2563eb",
+    "FT_4": "#1d4ed8",
+    "FT_5": "#93c5fd",
+    "FT_6": "#1e40af",
+    "PT_1": "#f59e0b",
+    "PT_2": "#fbbf24",
+    "PT_3": "#d97706",
+    "PT_4": "#fcd34d",
+    "BR_1": "#ef4444",
+    "BR_2": "#f87171",
+    "BR_3": "#dc2626",
+    "BR_4": "#fca5a5"
+}
+
 fig = px.timeline(
     filtered_df.sort_values(["employee", "start"]),
     x_start="start",
     x_end="end",
     y="employee",
-    color="group",
-    hover_data=["date", "hours", "day_type"],
-    color_discrete_map={
-        "Fulltime": "#93c5fd",
-        "Parttime": "#3b82f6",
-        "Brigádnik ráno": "#f9c2c2",
-        "Brigádnik večer": "#ef4444",
-        "Náhrada": "#22c55e"
-    }
+    color="employee",
+    text="group",
+    hover_data=["date", "hours", "day_type", "group"],
+    color_discrete_map=employee_colors
+)
+
+fig.update_traces(
+    textposition="inside",
+    insidetextanchor="middle"
 )
 
 fig.update_yaxes(autorange="reversed")
@@ -344,7 +360,7 @@ fig.update_layout(
     plot_bgcolor="#11182d",
     font=dict(color="white"),
     height=950,
-    legend_title_text="Typ smeny",
+    legend_title_text="Zamestnanec",
     xaxis_title="Dátum a čas",
     yaxis_title="Zamestnanec",
     margin=dict(l=20, r=20, t=60, b=20)
