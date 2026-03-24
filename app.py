@@ -4,7 +4,7 @@ import plotly.express as px
 from datetime import datetime, timedelta, date
 import calendar
 
-st.set_page_config(page_title="Supervisor Shift Planner", layout="wide")
+st.set_page_config(page_title="Rozvrh pracovníkov", layout="wide")
 
 st.markdown("""
 <style>
@@ -34,7 +34,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("Supervisor Shift Planner")
+st.title("Rozvrh pracovníkov")
 st.caption("Plán smien od februára do augusta, mesačný fond hodín a náhrady pri výpadku")
 
 DEFAULT_YEAR = 2026
@@ -54,7 +54,7 @@ def get_weekly_hours(name: str) -> int:
         return 36
     elif name.startswith("PT"):
         return 18
-    else:  # BR
+    else:
         return 16
 
 def monthly_fund_hours(year: int, month: int, weekly_hours: float) -> float:
@@ -138,7 +138,7 @@ for i in range(4):
     employees.append({
         "name": f"BR_{i+1}",
         "employee_type": "Brigádnik",
-        "weekly_hours": 18
+        "weekly_hours": 16
     })
 
 employees = pd.DataFrame(employees)
@@ -162,6 +162,11 @@ selected_month_numbers = [m for m in MONTHS_TO_PLAN if MONTH_NAME_SK[m] in selec
 
 show_weekends_only = st.sidebar.checkbox("Zobraziť len víkendy", value=False)
 
+view_mode = st.sidebar.selectbox(
+    "Pohľad",
+    ["Denný", "Týždenný", "Mesačný", "Celý"]
+)
+
 employee_options_base = sorted(employees["name"].tolist())
 selected_employees = st.sidebar.multiselect(
     "Výpadok zamestnancov",
@@ -182,6 +187,12 @@ absence_days = st.sidebar.slider(
 
 absence_end_date = absence_start_date + timedelta(days=absence_days - 1)
 st.sidebar.caption(f"Výpadok bude od {absence_start_date} do {absence_end_date}")
+
+selected_day = st.sidebar.date_input(
+    "Vybraný deň pre detail",
+    date(selected_year, 2, 1),
+    key="selected_day"
+)
 
 shifts = []
 
@@ -383,10 +394,26 @@ if selected_employees:
 
 filtered_df = filtered_df[filtered_df["group"].isin(selected_groups)].copy()
 
+# Pohľady
+if view_mode == "Denný":
+    filtered_df = filtered_df[filtered_df["date"] == selected_day].copy()
+elif view_mode == "Týždenný":
+    start_week = selected_day - timedelta(days=selected_day.weekday())
+    end_week = start_week + timedelta(days=6)
+    filtered_df = filtered_df[
+        (filtered_df["date"] >= start_week) &
+        (filtered_df["date"] <= end_week)
+    ].copy()
+elif view_mode == "Mesačný":
+    filtered_df = filtered_df[
+        (filtered_df["month"] == selected_day.month) &
+        (filtered_df["year"] == selected_day.year)
+    ].copy()
+
 col1, col2, col3, col4 = st.columns(4)
 
 total_shifts = len(filtered_df)
-total_hours = int(filtered_df["hours"].sum())
+total_hours = int(filtered_df["hours"].sum()) if not filtered_df.empty else 0
 scheduled_people = filtered_df["employee"].nunique()
 weekend_shifts = len(filtered_df[filtered_df["day_type"] == "Víkend"])
 
@@ -395,6 +422,36 @@ col2.metric("Naplánované hodiny", total_hours)
 col3.metric("Nasadení ľudia", scheduled_people)
 col4.metric("Víkendové smeny", weekend_shifts)
 
+# 1. Denný panel
+st.subheader("Dnešný prehľad")
+today_df = df[df["date"] == selected_day].copy()
+
+d1, d2, d3 = st.columns(3)
+d1.metric("Počet ľudí dnes", today_df["employee"].nunique())
+d2.metric("Počet smien dnes", len(today_df))
+d3.metric("Hodiny dnes", int(today_df["hours"].sum()) if not today_df.empty else 0)
+
+st.dataframe(today_df.sort_values(["start", "employee"]), use_container_width=True)
+
+# 2. Coverage
+st.subheader("Coverage (pokrytie smien)")
+coverage = df.groupby(["date", "group"]).size().unstack(fill_value=0)
+
+coverage["FT_needed"] = 2
+coverage["PT_needed"] = 2
+coverage["BR_needed"] = 2
+
+coverage["FT_actual"] = coverage.get("Fulltime", 0)
+coverage["PT_actual"] = coverage.get("Parttime", 0)
+coverage["BR_actual"] = coverage.get("Brigádnik ráno", 0) + coverage.get("Brigádnik večer", 0)
+
+coverage["FT_diff"] = coverage["FT_actual"] - coverage["FT_needed"]
+coverage["PT_diff"] = coverage["PT_actual"] - coverage["PT_needed"]
+coverage["BR_diff"] = coverage["BR_actual"] - coverage["BR_needed"]
+
+st.dataframe(coverage.reset_index(), use_container_width=True)
+
+# Výpadky
 if absence_messages:
     absence_df = pd.DataFrame(absence_messages)
 
@@ -423,10 +480,19 @@ if replacement_rows:
     st.subheader("Top odporúčaní náhradníci podľa dní")
     st.dataframe(replacement_table, use_container_width=True)
 
-fund_df = build_monthly_fund_table(filtered_df, employees, selected_month_numbers, selected_year)
+# 4. Fairness
+st.subheader("Fairness (spravodlivosť rozdelenia)")
+fairness = df.groupby("employee").agg(
+    total_hours=("hours", "sum"),
+    shifts=("employee", "count"),
+    weekend_shifts=("day_type", lambda x: (x == "Víkend").sum())
+).reset_index()
+fairness["employee_type"] = fairness["employee"].apply(get_employee_type)
+st.dataframe(fairness.sort_values(["employee_type", "employee"]), use_container_width=True)
+
+fund_df = build_monthly_fund_table(df, employees, selected_month_numbers, selected_year)
 
 st.subheader("Mesačné alerty fondu hodín")
-
 month_alerts = fund_df.groupby(["month_name", "status"], as_index=False).size().rename(columns={"size": "count"})
 st.dataframe(month_alerts, use_container_width=True)
 
@@ -446,15 +512,22 @@ employee_colors = {
     "BR_1": "#ef4444",
     "BR_2": "#f87171",
     "BR_3": "#dc2626",
-    "BR_4": "#fca5a5"
+    "BR_4": "#fca5a5",
+    "Náhrada": "#22c55e"
 }
 
+plot_df = filtered_df.copy()
+plot_df["color_type"] = plot_df.apply(
+    lambda x: "Náhrada" if x["group"] == "Náhrada" else x["employee"],
+    axis=1
+)
+
 fig = px.timeline(
-    filtered_df.sort_values(["employee", "start"]),
+    plot_df.sort_values(["employee", "start"]),
     x_start="start",
     x_end="end",
     y="employee",
-    color="employee",
+    color="color_type",
     text="group",
     hover_data=["date", "hours", "day_type", "month_name"],
     color_discrete_map=employee_colors
@@ -468,13 +541,23 @@ fig.update_layout(
     plot_bgcolor="#11182d",
     font=dict(color="white"),
     height=950,
-    legend_title_text="Zamestnanec",
+    legend_title_text="Zamestnanec / Náhrada",
     xaxis_title="Dátum a čas",
     yaxis_title="Zamestnanec",
     margin=dict(l=20, r=20, t=60, b=20)
 )
 
 st.plotly_chart(fig, use_container_width=True)
+
+# 7. Export
+st.subheader("Export dát")
+csv_data = df.to_csv(index=False).encode("utf-8")
+st.download_button(
+    "Stiahnuť rozvrh (CSV)",
+    data=csv_data,
+    file_name="rozvrh_pracovnikov.csv",
+    mime="text/csv"
+)
 
 st.subheader("Fond hodín podľa kalendárnych mesiacov")
 st.dataframe(
