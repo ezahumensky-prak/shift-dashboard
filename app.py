@@ -37,7 +37,6 @@ st.markdown("""
 st.title("Rozvrh pracovníkov")
 st.caption("Plán smien od februára do augusta, mesačný fond hodín a náhrady pri výpadku")
 
-DEFAULT_YEAR = 2026
 MONTHS_TO_PLAN = [2, 3, 4, 5, 6, 7, 8]
 MONTH_NAME_SK = {
     1: "Január", 2: "Február", 3: "Marec", 4: "Apríl",
@@ -45,9 +44,11 @@ MONTH_NAME_SK = {
     9: "September", 10: "Október", 11: "November", 12: "December"
 }
 
+
 def month_start_end(year: int, month: int):
     last_day = calendar.monthrange(year, month)[1]
     return date(year, month, 1), date(year, month, last_day)
+
 
 def get_weekly_hours(name: str) -> int:
     if name.startswith("FT"):
@@ -57,11 +58,13 @@ def get_weekly_hours(name: str) -> int:
     else:
         return 16
 
+
 def monthly_fund_hours(year: int, month: int, weekly_hours: float) -> float:
     weeks_in_month = calendar.monthcalendar(year, month)
     weekday_count = sum(1 for week in weeks_in_month for day in week[:5] if day != 0)
     daily_hours = weekly_hours / 5
     return round(weekday_count * daily_hours, 1)
+
 
 def get_employee_type(name: str) -> str:
     if name.startswith("FT"):
@@ -70,8 +73,10 @@ def get_employee_type(name: str) -> str:
         return "Parttime"
     return "Brigádnik"
 
+
 def is_weekend(date_value) -> bool:
     return pd.Timestamp(date_value).weekday() >= 5
+
 
 def build_monthly_fund_table(source_df: pd.DataFrame, employees_df: pd.DataFrame, months: list[int], year: int) -> pd.DataFrame:
     rows = []
@@ -118,6 +123,10 @@ def build_monthly_fund_table(source_df: pd.DataFrame, employees_df: pd.DataFrame
 
     return pd.DataFrame(rows)
 
+
+# ----------------------------
+# ZAMESTNANCI
+# ----------------------------
 employees = []
 
 for i in range(6):
@@ -143,6 +152,9 @@ for i in range(4):
 
 employees = pd.DataFrame(employees)
 
+# ----------------------------
+# SIDEBAR
+# ----------------------------
 st.sidebar.header("Nastavenia")
 
 selected_year = st.sidebar.selectbox("Rok", [2025, 2026, 2027], index=1)
@@ -167,6 +179,18 @@ view_mode = st.sidebar.selectbox(
     ["Denný", "Týždenný", "Mesačný", "Celý"]
 )
 
+selected_day = st.sidebar.date_input(
+    "Vybraný deň pre detail",
+    date(selected_year, 2, 1)
+)
+
+selected_month_for_view = st.sidebar.selectbox(
+    "Mesiac pre mesačný pohľad",
+    [MONTH_NAME_SK[m] for m in MONTHS_TO_PLAN],
+    index=0
+)
+selected_month_for_view_num = [m for m, label in MONTH_NAME_SK.items() if label == selected_month_for_view][0]
+
 employee_options_base = sorted(employees["name"].tolist())
 selected_employees = st.sidebar.multiselect(
     "Výpadok zamestnancov",
@@ -175,7 +199,8 @@ selected_employees = st.sidebar.multiselect(
 
 absence_start_date = st.sidebar.date_input(
     "Začiatok výpadku",
-    date(selected_year, 2, 1)
+    date(selected_year, 2, 1),
+    key="absence_start"
 )
 
 absence_days = st.sidebar.slider(
@@ -188,12 +213,9 @@ absence_days = st.sidebar.slider(
 absence_end_date = absence_start_date + timedelta(days=absence_days - 1)
 st.sidebar.caption(f"Výpadok bude od {absence_start_date} do {absence_end_date}")
 
-selected_day = st.sidebar.date_input(
-    "Vybraný deň pre detail",
-    date(selected_year, 2, 1),
-    key="selected_day"
-)
-
+# ----------------------------
+# GENEROVANIE PLÁNU
+# ----------------------------
 shifts = []
 
 ft_names = employees[employees["employee_type"] == "Fulltime"]["name"].tolist()
@@ -265,16 +287,20 @@ for month in MONTHS_TO_PLAN:
         current_date += timedelta(days=1)
         day_index += 1
 
-df = pd.DataFrame(shifts)
-df["day_type"] = df["date"].apply(lambda x: "Víkend" if is_weekend(x) else "Pracovný deň")
+base_df = pd.DataFrame(shifts)
+base_df["date"] = pd.to_datetime(base_df["date"]).dt.date
+base_df["day_type"] = base_df["date"].apply(lambda x: "Víkend" if is_weekend(x) else "Pracovný deň")
 
-filtered_df = df.copy()
+# ----------------------------
+# SCENÁR PRE VÝPADKY
+# ----------------------------
+scenario_df = base_df.copy()
 
 if selected_month_numbers:
-    filtered_df = filtered_df[filtered_df["month"].isin(selected_month_numbers)].copy()
+    scenario_df = scenario_df[scenario_df["month"].isin(selected_month_numbers)].copy()
 
 if show_weekends_only:
-    filtered_df = filtered_df[filtered_df["day_type"] == "Víkend"].copy()
+    scenario_df = scenario_df[scenario_df["day_type"] == "Víkend"].copy()
 
 replacement_rows = []
 absence_messages = []
@@ -285,11 +311,11 @@ if selected_employees:
     for current_absence_date in absence_dates:
         for selected_employee in selected_employees:
             day_mask = (
-                (filtered_df["employee"] == selected_employee) &
-                (filtered_df["date"] == current_absence_date)
+                (scenario_df["employee"] == selected_employee) &
+                (scenario_df["date"] == current_absence_date)
             )
 
-            missing_shift_df = filtered_df[day_mask]
+            missing_shift_df = scenario_df[day_mask]
 
             if missing_shift_df.empty:
                 absence_messages.append({
@@ -301,7 +327,7 @@ if selected_employees:
                 continue
 
             missing_shift = missing_shift_df.iloc[0]
-            filtered_df = filtered_df[~day_mask].copy()
+            scenario_df = scenario_df[~day_mask].copy()
 
             missing_group = missing_shift["group"]
             missing_hours = missing_shift["hours"]
@@ -313,7 +339,7 @@ if selected_employees:
             else:
                 allowed_candidate_types = ["Brigádnik", "Parttime"]
 
-            used_today = set(filtered_df[filtered_df["date"] == current_absence_date]["employee"].tolist())
+            used_today = set(scenario_df[scenario_df["date"] == current_absence_date]["employee"].tolist())
 
             candidates = employees.copy()
             candidates = candidates[~candidates["name"].isin(used_today)].copy()
@@ -328,10 +354,10 @@ if selected_employees:
                 c_type = row["candidate_type"]
                 c_wh = get_weekly_hours(c_name)
 
-                planned_match = filtered_df[
-                    (filtered_df["employee"] == c_name) &
-                    (filtered_df["year"] == current_absence_date.year) &
-                    (filtered_df["month"] == current_absence_date.month)
+                planned_match = scenario_df[
+                    (scenario_df["employee"] == c_name) &
+                    (scenario_df["year"] == current_absence_date.year) &
+                    (scenario_df["month"] == current_absence_date.month)
                 ]["hours"].sum()
 
                 month_fund = monthly_fund_hours(current_absence_date.year, current_absence_date.month, c_wh)
@@ -362,8 +388,8 @@ if selected_employees:
 
                 replacement = candidates.iloc[0]["name"]
 
-                filtered_df = pd.concat([
-                    filtered_df,
+                scenario_df = pd.concat([
+                    scenario_df,
                     pd.DataFrame([{
                         "employee": replacement,
                         "date": current_absence_date,
@@ -392,39 +418,52 @@ if selected_employees:
                     "status": "Nepokryté"
                 })
 
-filtered_df = filtered_df[filtered_df["group"].isin(selected_groups)].copy()
+scenario_df = scenario_df[scenario_df["group"].isin(selected_groups)].copy()
 
-# Pohľady
+# ----------------------------
+# DISPLAY DATASET PODĽA POHĽADU
+# ----------------------------
+display_df = scenario_df.copy()
+
 if view_mode == "Denný":
-    filtered_df = filtered_df[filtered_df["date"] == selected_day].copy()
+    display_df = display_df[display_df["date"] == selected_day].copy()
+
 elif view_mode == "Týždenný":
     start_week = selected_day - timedelta(days=selected_day.weekday())
     end_week = start_week + timedelta(days=6)
-    filtered_df = filtered_df[
-        (filtered_df["date"] >= start_week) &
-        (filtered_df["date"] <= end_week)
-    ].copy()
-elif view_mode == "Mesačný":
-    filtered_df = filtered_df[
-        (filtered_df["month"] == selected_day.month) &
-        (filtered_df["year"] == selected_day.year)
+    display_df = display_df[
+        (display_df["date"] >= start_week) &
+        (display_df["date"] <= end_week)
     ].copy()
 
+elif view_mode == "Mesačný":
+    display_df = display_df[
+        (display_df["month"] == selected_month_for_view_num) &
+        (display_df["year"] == selected_year)
+    ].copy()
+
+# Celý = bez ďalšieho filtra
+
+# ----------------------------
+# KPI
+# ----------------------------
 col1, col2, col3, col4 = st.columns(4)
 
-total_shifts = len(filtered_df)
-total_hours = int(filtered_df["hours"].sum()) if not filtered_df.empty else 0
-scheduled_people = filtered_df["employee"].nunique()
-weekend_shifts = len(filtered_df[filtered_df["day_type"] == "Víkend"])
+total_shifts = len(display_df)
+total_hours = int(display_df["hours"].sum()) if not display_df.empty else 0
+scheduled_people = display_df["employee"].nunique()
+weekend_shifts = len(display_df[display_df["day_type"] == "Víkend"])
 
 col1.metric("Naplánované smeny", total_shifts)
 col2.metric("Naplánované hodiny", total_hours)
 col3.metric("Nasadení ľudia", scheduled_people)
 col4.metric("Víkendové smeny", weekend_shifts)
 
-# 1. Denný panel
+# ----------------------------
+# DENNÝ PANEL
+# ----------------------------
 st.subheader("Dnešný prehľad")
-today_df = df[df["date"] == selected_day].copy()
+today_df = scenario_df[scenario_df["date"] == selected_day].copy()
 
 d1, d2, d3 = st.columns(3)
 d1.metric("Počet ľudí dnes", today_df["employee"].nunique())
@@ -433,9 +472,11 @@ d3.metric("Hodiny dnes", int(today_df["hours"].sum()) if not today_df.empty else
 
 st.dataframe(today_df.sort_values(["start", "employee"]), use_container_width=True)
 
-# 2. Coverage
+# ----------------------------
+# COVERAGE
+# ----------------------------
 st.subheader("Coverage (pokrytie smien)")
-coverage = df.groupby(["date", "group"]).size().unstack(fill_value=0)
+coverage = scenario_df.groupby(["date", "group"]).size().unstack(fill_value=0)
 
 coverage["FT_needed"] = 2
 coverage["PT_needed"] = 2
@@ -451,7 +492,9 @@ coverage["BR_diff"] = coverage["BR_actual"] - coverage["BR_needed"]
 
 st.dataframe(coverage.reset_index(), use_container_width=True)
 
-# Výpadky
+# ----------------------------
+# VÝPADKY
+# ----------------------------
 if absence_messages:
     absence_df = pd.DataFrame(absence_messages)
 
@@ -480,9 +523,11 @@ if replacement_rows:
     st.subheader("Top odporúčaní náhradníci podľa dní")
     st.dataframe(replacement_table, use_container_width=True)
 
-# 4. Fairness
+# ----------------------------
+# FAIRNESS
+# ----------------------------
 st.subheader("Fairness (spravodlivosť rozdelenia)")
-fairness = df.groupby("employee").agg(
+fairness = scenario_df.groupby("employee").agg(
     total_hours=("hours", "sum"),
     shifts=("employee", "count"),
     weekend_shifts=("day_type", lambda x: (x == "Víkend").sum())
@@ -490,12 +535,18 @@ fairness = df.groupby("employee").agg(
 fairness["employee_type"] = fairness["employee"].apply(get_employee_type)
 st.dataframe(fairness.sort_values(["employee_type", "employee"]), use_container_width=True)
 
-fund_df = build_monthly_fund_table(df, employees, selected_month_numbers, selected_year)
+# ----------------------------
+# FOND HODÍN
+# ----------------------------
+fund_df = build_monthly_fund_table(scenario_df, employees, selected_month_numbers, selected_year)
 
 st.subheader("Mesačné alerty fondu hodín")
 month_alerts = fund_df.groupby(["month_name", "status"], as_index=False).size().rename(columns={"size": "count"})
 st.dataframe(month_alerts, use_container_width=True)
 
+# ----------------------------
+# KALENDÁR
+# ----------------------------
 st.subheader("Kalendár smien")
 
 employee_colors = {
@@ -516,7 +567,7 @@ employee_colors = {
     "Náhrada": "#22c55e"
 }
 
-plot_df = filtered_df.copy()
+plot_df = display_df.copy()
 plot_df["color_type"] = plot_df.apply(
     lambda x: "Náhrada" if x["group"] == "Náhrada" else x["employee"],
     axis=1
@@ -536,7 +587,7 @@ fig = px.timeline(
 fig.update_traces(textposition="inside", insidetextanchor="middle")
 fig.update_yaxes(autorange="reversed")
 fig.update_layout(
-    title=f"Plán smien od februára do augusta {selected_year}",
+    title=f"Plán smien – {view_mode} pohľad",
     paper_bgcolor="#11182d",
     plot_bgcolor="#11182d",
     font=dict(color="white"),
@@ -549,9 +600,11 @@ fig.update_layout(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# 7. Export
+# ----------------------------
+# EXPORT
+# ----------------------------
 st.subheader("Export dát")
-csv_data = df.to_csv(index=False).encode("utf-8")
+csv_data = scenario_df.to_csv(index=False).encode("utf-8")
 st.download_button(
     "Stiahnuť rozvrh (CSV)",
     data=csv_data,
@@ -559,6 +612,9 @@ st.download_button(
     mime="text/csv"
 )
 
+# ----------------------------
+# TABUĽKA FONDU
+# ----------------------------
 st.subheader("Fond hodín podľa kalendárnych mesiacov")
 st.dataframe(
     fund_df.sort_values(["month", "employee_type", "employee"]),
