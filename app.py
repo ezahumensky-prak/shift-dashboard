@@ -942,40 +942,54 @@ st.dataframe(
     hide_index=True
 )
 
+
 # -----------------------------------
 # Vytvorenie baseline plánu
 # -----------------------------------
 base_df, planner_warnings_df = generate_monthly_schedule(
     selected_year, selected_month_num, employees_df, availability_map, target_hours_map
 )
-
 baseline_heatmap = make_heatmap_df(base_df, selected_year, selected_month_num)
+
+
 # -----------------------------------
-# Sidebar – výpadky a pohľady
+# Stav filtrov a simulácie bez sidebaru
 # -----------------------------------
-st.sidebar.header("Filtrovanie a simulácia")
-view_mode = st.sidebar.selectbox("Pohľad kalendára", ["Denný", "Týždenný", "Mesačný", "Celý mesiac"])
-selected_day = st.sidebar.date_input(
-    "Vybraný deň",
-    value=start_d,
-    min_value=start_d,
-    max_value=end_d
-)
+if "calendar_focus_day" not in st.session_state or not (start_d <= st.session_state["calendar_focus_day"] <= end_d):
+    st.session_state["calendar_focus_day"] = start_d
+
+if "calendar_view_mode" not in st.session_state:
+    st.session_state["calendar_view_mode"] = "Celý mesiac"
+
+if "sim_absent_people" not in st.session_state:
+    st.session_state["sim_absent_people"] = []
+
+if "sim_absence_start" not in st.session_state or not (start_d <= st.session_state["sim_absence_start"] <= end_d):
+    st.session_state["sim_absence_start"] = start_d
+
+if "sim_absence_end" not in st.session_state or not (start_d <= st.session_state["sim_absence_end"] <= end_d):
+    st.session_state["sim_absence_end"] = start_d
+
+selected_day = st.session_state["calendar_focus_day"]
+view_mode = st.session_state["calendar_view_mode"]
 
 employee_list = employees_df["name"].tolist()
-available_employee_list = [emp for emp in employee_list if availability_summary_df.set_index("employee").loc[emp, "active"]]
+available_lookup = availability_summary_df.set_index("employee")["active"].to_dict()
+available_employee_list = [emp for emp in employee_list if available_lookup.get(emp, False)]
 
-st.sidebar.subheader("Simulácia výpadku pracovníkov")
-absent_people = st.sidebar.multiselect("Kto vypadne", available_employee_list, max_selections=3)
-absence_range = st.sidebar.date_input(
-    "Interval výpadku",
-    value=(start_d, start_d),
-    min_value=start_d,
-    max_value=end_d,
-    key="absence_range"
+absence_start, absence_end = normalize_range(
+    (st.session_state["sim_absence_start"], st.session_state["sim_absence_end"]),
+    start_d,
+    end_d
 )
-absence_start, absence_end = normalize_range(absence_range, start_d, end_d)
+st.session_state["sim_absence_start"] = absence_start
+st.session_state["sim_absence_end"] = absence_end
+
+absent_people = [emp for emp in st.session_state["sim_absent_people"] if emp in available_employee_list]
+st.session_state["sim_absent_people"] = absent_people
+
 absence_dates = sorted(list(daterange_to_set(absence_start, absence_end))) if absent_people else []
+
 
 # -----------------------------------
 # Výpadok bez náhrad
@@ -983,11 +997,13 @@ absence_dates = sorted(list(daterange_to_set(absence_start, absence_end))) if ab
 after_absence_df = base_df.copy()
 if absent_people:
     mask_absence = after_absence_df.apply(
-        lambda r: r["employee"] in absent_people and r["date"] in absence_dates, axis=1
+        lambda r: r["employee"] in absent_people and r["date"] in absence_dates,
+        axis=1
     )
     after_absence_df = after_absence_df[~mask_absence].copy()
 
 after_absence_heatmap = make_heatmap_df(after_absence_df, selected_year, selected_month_num)
+
 
 # -----------------------------------
 # Výpadok + náhrady + dobehnutie
@@ -996,7 +1012,6 @@ final_df, absence_df, replacement_df, catchup_df = apply_absences_and_replacemen
     base_df, employees_df, absent_people, absence_dates, unavailable_map, target_hours_map
 )
 final_heatmap = make_heatmap_df(final_df, selected_year, selected_month_num)
-
 # -----------------------------------
 # KPI
 # -----------------------------------
@@ -1165,10 +1180,74 @@ st.download_button(
 )
 
 # -----------------------------------
+# Simulácia výpadku nad timeline kalendárom
+# -----------------------------------
+st.subheader("10. Simulácia výpadku pracovníkov")
+
+sim1, sim2, sim3 = st.columns([2, 1, 1])
+
+sim1.multiselect(
+    "Kto vypadne",
+    available_employee_list,
+    key="sim_absent_people",
+    max_selections=3
+)
+
+sim2.date_input(
+    "Výpadok od",
+    value=st.session_state["sim_absence_start"],
+    min_value=start_d,
+    max_value=end_d,
+    key="sim_absence_start"
+)
+
+sim3.date_input(
+    "Výpadok do",
+    value=st.session_state["sim_absence_end"],
+    min_value=start_d,
+    max_value=end_d,
+    key="sim_absence_end"
+)
+
+reset1, reset2 = st.columns([1, 4])
+if reset1.button("Vymazať simuláciu výpadku"):
+    st.session_state["sim_absent_people"] = []
+    st.session_state["sim_absence_start"] = start_d
+    st.session_state["sim_absence_end"] = start_d
+    st.rerun()
+
+if st.session_state["sim_absent_people"]:
+    st.info(
+        f"Simulovaný výpadok: {', '.join(st.session_state['sim_absent_people'])} | "
+        f"{st.session_state['sim_absence_start']} až {st.session_state['sim_absence_end']}"
+    )
+else:
+    st.info("Momentálne nie je nastavený žiadny simulovaný výpadok.")
+
+# -----------------------------------
 # Timeline kalendár dole
 # -----------------------------------
-st.subheader("10. Timeline kalendár")
+st.subheader("11. Timeline kalendár")
+
+f1, f2 = st.columns([1, 1])
+
+f1.selectbox(
+    "Pohľad kalendára",
+    ["Denný", "Týždenný", "Mesačný", "Celý mesiac"],
+    key="calendar_view_mode"
+)
+
+f2.date_input(
+    "Vybraný deň",
+    value=st.session_state["calendar_focus_day"],
+    min_value=start_d,
+    max_value=end_d,
+    key="calendar_focus_day"
+)
+
 plot_df = final_df.copy()
+view_mode = st.session_state["calendar_view_mode"]
+selected_day = st.session_state["calendar_focus_day"]
 
 if view_mode == "Denný":
     plot_df = plot_df[plot_df["date"] == selected_day].copy()
