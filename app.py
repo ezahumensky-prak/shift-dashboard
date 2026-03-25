@@ -630,15 +630,28 @@ def find_best_candidates(df_current: pd.DataFrame, employees_df: pd.DataFrame, m
     return candidate_df, pair_df
 
 
-def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.DataFrame, absent_people: list,
-                                    absent_dates: list, unavailable_map: dict, target_hours_map: dict):
+def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.DataFrame, absence_entries: list,
+                                    unavailable_map: dict, target_hours_map: dict):
     df_after_absence = df_base.copy()
     absence_log = []
     replacement_log = []
     catchup_log = []
 
-    for d in absent_dates:
-        for emp in absent_people:
+    absence_map = {}
+    date_absent_people_map = {}
+
+    for entry in absence_entries:
+        emp = entry["employee"]
+        dates = entry["dates"]
+        absence_map.setdefault(emp, set()).update(dates)
+
+        for d in dates:
+            date_absent_people_map.setdefault(d, set()).add(emp)
+
+    for entry in absence_entries:
+        emp = entry["employee"]
+
+        for d in entry["dates"]:
             mask = (df_after_absence["employee"] == emp) & (df_after_absence["date"] == d)
             missing_rows = df_after_absence[mask].copy()
 
@@ -654,8 +667,15 @@ def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.Data
             missing_shift = missing_rows.iloc[0]
             df_after_absence = df_after_absence[~mask].copy()
 
+            absent_people_today = list(date_absent_people_map.get(d, set()))
+
             candidate_df, pair_df = find_best_candidates(
-                df_after_absence, employees_df, missing_shift, absent_people, unavailable_map, target_hours_map
+                df_after_absence,
+                employees_df,
+                missing_shift,
+                absent_people_today,
+                unavailable_map,
+                target_hours_map
             )
 
             replacement_done = False
@@ -740,7 +760,7 @@ def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.Data
                     "replacement": ""
                 })
 
-    for emp in absent_people:
+    for emp, emp_absence_dates in absence_map.items():
         emp_months = sorted(df_base[df_base["employee"] == emp]["month"].unique().tolist())
         for m in emp_months:
             base_hours = df_base[(df_base["employee"] == emp) & (df_base["month"] == m)]["hours"].sum()
@@ -756,7 +776,7 @@ def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.Data
                     break
                 if d in unavailable_map.get(emp, set()):
                     continue
-                if emp in absent_people and d in absent_dates:
+                if d in emp_absence_dates:
                     continue
                 if not df_after_absence[(df_after_absence["employee"] == emp) & (df_after_absence["date"] == d)].empty:
                     continue
@@ -961,15 +981,6 @@ if "calendar_focus_day" not in st.session_state or not (start_d <= st.session_st
 if "calendar_view_mode" not in st.session_state:
     st.session_state["calendar_view_mode"] = "Celý mesiac"
 
-if "sim_absent_people" not in st.session_state:
-    st.session_state["sim_absent_people"] = []
-
-if "sim_absence_start" not in st.session_state or not (start_d <= st.session_state["sim_absence_start"] <= end_d):
-    st.session_state["sim_absence_start"] = start_d
-
-if "sim_absence_end" not in st.session_state or not (start_d <= st.session_state["sim_absence_end"] <= end_d):
-    st.session_state["sim_absence_end"] = start_d
-
 selected_day = st.session_state["calendar_focus_day"]
 view_mode = st.session_state["calendar_view_mode"]
 
@@ -977,40 +988,74 @@ employee_list = employees_df["name"].tolist()
 available_lookup = availability_summary_df.set_index("employee")["active"].to_dict()
 available_employee_list = [emp for emp in employee_list if available_lookup.get(emp, False)]
 
-absence_start, absence_end = normalize_range(
-    (st.session_state["sim_absence_start"], st.session_state["sim_absence_end"]),
-    start_d,
-    end_d
-)
-st.session_state["sim_absence_start"] = absence_start
-st.session_state["sim_absence_end"] = absence_end
+for i in range(3):
+    emp_key = f"sim_absent_person_{i}"
+    start_key = f"sim_absence_start_{i}"
+    end_key = f"sim_absence_end_{i}"
 
-absent_people = [emp for emp in st.session_state["sim_absent_people"] if emp in available_employee_list]
-st.session_state["sim_absent_people"] = absent_people
+    if emp_key not in st.session_state:
+        st.session_state[emp_key] = "---"
 
-absence_dates = sorted(list(daterange_to_set(absence_start, absence_end))) if absent_people else []
+    if start_key not in st.session_state or not (start_d <= st.session_state[start_key] <= end_d):
+        st.session_state[start_key] = start_d
 
+    if end_key not in st.session_state or not (start_d <= st.session_state[end_key] <= end_d):
+        st.session_state[end_key] = start_d
+
+    normalized_start, normalized_end = normalize_range(
+        (st.session_state[start_key], st.session_state[end_key]),
+        start_d,
+        end_d
+    )
+    st.session_state[start_key] = normalized_start
+    st.session_state[end_key] = normalized_end
+
+absence_entries = []
+for i in range(3):
+    emp = st.session_state[f"sim_absent_person_{i}"]
+    if emp == "---" or emp not in available_employee_list:
+        continue
+
+    start_abs = st.session_state[f"sim_absence_start_{i}"]
+    end_abs = st.session_state[f"sim_absence_end_{i}"]
+    start_abs, end_abs = normalize_range((start_abs, end_abs), start_d, end_d)
+    dates = sorted(list(daterange_to_set(start_abs, end_abs)))
+
+    absence_entries.append({
+        "employee": emp,
+        "start": start_abs,
+        "end": end_abs,
+        "dates": dates
+    })
+
+absent_people = sorted(set(entry["employee"] for entry in absence_entries))
+absence_dates = sorted(set(d for entry in absence_entries for d in entry["dates"]))
 
 # -----------------------------------
 # Výpadok bez náhrad
 # -----------------------------------
 after_absence_df = base_df.copy()
-if absent_people:
+
+if absence_entries:
+    absence_map = {}
+    for entry in absence_entries:
+        absence_map.setdefault(entry["employee"], set()).update(entry["dates"])
+
     mask_absence = after_absence_df.apply(
-        lambda r: r["employee"] in absent_people and r["date"] in absence_dates,
+        lambda r: r["date"] in absence_map.get(r["employee"], set()),
         axis=1
     )
     after_absence_df = after_absence_df[~mask_absence].copy()
 
 after_absence_heatmap = make_heatmap_df(after_absence_df, selected_year, selected_month_num)
 
-
 # -----------------------------------
 # Výpadok + náhrady + dobehnutie
 # -----------------------------------
 final_df, absence_df, replacement_df, catchup_df = apply_absences_and_replacements(
-    base_df, employees_df, absent_people, absence_dates, unavailable_map, target_hours_map
+    base_df, employees_df, absence_entries, unavailable_map, target_hours_map
 )
+
 final_heatmap = make_heatmap_df(final_df, selected_year, selected_month_num)
 # -----------------------------------
 # KPI
@@ -1183,44 +1228,47 @@ st.download_button(
 # Simulácia výpadku nad timeline kalendárom
 # -----------------------------------
 st.subheader("10. Simulácia výpadku pracovníkov")
+st.caption("Každý riadok môže mať iného pracovníka a iný interval výpadku.")
 
-sim1, sim2, sim3 = st.columns([2, 1, 1])
+for i in range(3):
+    s1, s2, s3 = st.columns([2, 1, 1])
 
-sim1.multiselect(
-    "Kto vypadne",
-    available_employee_list,
-    key="sim_absent_people",
-    max_selections=3
-)
+    s1.selectbox(
+        f"Výpadok {i+1} – pracovník",
+        ["---"] + available_employee_list,
+        key=f"sim_absent_person_{i}"
+    )
 
-sim2.date_input(
-    "Výpadok od",
-    value=st.session_state["sim_absence_start"],
-    min_value=start_d,
-    max_value=end_d,
-    key="sim_absence_start"
-)
+    s2.date_input(
+        f"Výpadok {i+1} od",
+        value=st.session_state[f"sim_absence_start_{i}"],
+        min_value=start_d,
+        max_value=end_d,
+        key=f"sim_absence_start_{i}"
+    )
 
-sim3.date_input(
-    "Výpadok do",
-    value=st.session_state["sim_absence_end"],
-    min_value=start_d,
-    max_value=end_d,
-    key="sim_absence_end"
-)
+    s3.date_input(
+        f"Výpadok {i+1} do",
+        value=st.session_state[f"sim_absence_end_{i}"],
+        min_value=start_d,
+        max_value=end_d,
+        key=f"sim_absence_end_{i}"
+    )
 
 reset1, reset2 = st.columns([1, 4])
 if reset1.button("Vymazať simuláciu výpadku"):
-    st.session_state["sim_absent_people"] = []
-    st.session_state["sim_absence_start"] = start_d
-    st.session_state["sim_absence_end"] = start_d
+    for i in range(3):
+        st.session_state[f"sim_absent_person_{i}"] = "---"
+        st.session_state[f"sim_absence_start_{i}"] = start_d
+        st.session_state[f"sim_absence_end_{i}"] = start_d
     st.rerun()
 
-if st.session_state["sim_absent_people"]:
-    st.info(
-        f"Simulovaný výpadok: {', '.join(st.session_state['sim_absent_people'])} | "
-        f"{st.session_state['sim_absence_start']} až {st.session_state['sim_absence_end']}"
-    )
+if absence_entries:
+    info_lines = [
+        f"{entry['employee']}: {entry['start']} až {entry['end']}"
+        for entry in absence_entries
+    ]
+    st.info("Simulované výpadky: " + " | ".join(info_lines))
 else:
     st.info("Momentálne nie je nastavený žiadny simulovaný výpadok.")
 
