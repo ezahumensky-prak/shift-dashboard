@@ -61,9 +61,6 @@ REPLACEMENT_COLUMNS = ["date", "missing_employee", "replacement", "replacement_t
 CATCHUP_COLUMNS = ["employee", "date", "hours_added", "month"]
 
 
-# -----------------------------------
-# Pomocné funkcie
-# -----------------------------------
 def month_start_end(year: int, month: int):
     last_day = calendar.monthrange(year, month)[1]
     return date(year, month, 1), date(year, month, last_day)
@@ -198,33 +195,46 @@ def projected_consecutive(last_date, current_date, current_consecutive):
     return 1
 
 
-def make_heatmap_df(source_df: pd.DataFrame, year: int, month: int, vacation_days_map: dict | None = None):
+def build_vacation_days_map(employee_settings: dict, start_d: date, end_d: date):
+    vacation_days_map = {}
+    for emp, settings in employee_settings.items():
+        vacation_days = set()
+        if settings["active"]:
+            for vac_start, vac_end in settings["vacations"]:
+                vac_start, vac_end = normalize_range((vac_start, vac_end), start_d, end_d)
+                vacation_days.update(daterange_to_set(vac_start, vac_end))
+        vacation_days_map[emp] = vacation_days
+    return vacation_days_map
+
+
+def make_heatmap_df(source_df: pd.DataFrame, year: int, month: int, vacation_days_map=None):
     start_d, end_d = month_start_end(year, month)
     dates = pd.date_range(start_d, end_d, freq="D")
 
     rows = []
-for dts in dates:
-    d = dts.date()
-    actual = source_df[source_df["date"] == d]["employee"].nunique()
-    required = day_requirement(d)
-    preferred = preferred_extra_headcount(d)
+    for dts in dates:
+        d = dts.date()
+        actual = source_df[source_df["date"] == d]["employee"].nunique()
+        required = day_requirement(d)
+        preferred = preferred_extra_headcount(d)
 
-    vacation_count = 0
-    if vacation_days_map is not None:
-        vacation_count = sum(1 for emp, vac_days in vacation_days_map.items() if d in vac_days)
+        vacation_count = 0
+        if vacation_days_map is not None:
+            vacation_count = sum(1 for _, vac_days in vacation_days_map.items() if d in vac_days)
 
-    rows.append({
-        "date": d,
-        "day": d.day,
-        "weekday": weekday_short_sk(d),
-        "actual": actual,
-        "required": required,
-        "preferred": preferred,
-        "vacation_count": vacation_count,
-        "score": staffing_score_color(actual, required),
-        "label": staffing_label(actual, required)
-    })
-return pd.DataFrame(rows)
+        rows.append({
+            "date": d,
+            "day": d.day,
+            "weekday": weekday_short_sk(d),
+            "actual": actual,
+            "required": required,
+            "preferred": preferred,
+            "vacation_count": vacation_count,
+            "score": staffing_score_color(actual, required),
+            "label": staffing_label(actual, required)
+        })
+
+    return pd.DataFrame(rows)
 
 
 def render_heatmap(heatmap_df: pd.DataFrame, title: str):
@@ -303,7 +313,6 @@ def render_heatmap(heatmap_df: pd.DataFrame, title: str):
     )
 
     fig.update_yaxes(showgrid=False)
-
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -350,21 +359,6 @@ def build_availability_and_targets(year: int, month: int, employees_df: pd.DataF
         })
 
     return availability_map, unavailable_map, target_hours_map, pd.DataFrame(rows)
-
-def build_vacation_days_map(employee_settings: dict, start_d: date, end_d: date):
-    vacation_days_map = {}
-
-    for emp, settings in employee_settings.items():
-        vacation_days = set()
-
-        if settings["active"]:
-            for vac_start, vac_end in settings["vacations"]:
-                vac_start, vac_end = normalize_range((vac_start, vac_end), start_d, end_d)
-                vacation_days.update(daterange_to_set(vac_start, vac_end))
-
-        vacation_days_map[emp] = vacation_days
-
-    return vacation_days_map
 
 
 def initialize_stats(employees_df: pd.DataFrame):
@@ -631,7 +625,7 @@ def find_best_candidates(df_current: pd.DataFrame, employees_df: pd.DataFrame, m
     candidate_df = pd.DataFrame(options)
 
     pair_df = pd.DataFrame()
-    if missing_type == "FT" and not candidate_df.empty:
+    if not candidate_df.empty and missing_type == "FT":
         pt_candidates = candidate_df[candidate_df["employee_type"] == "PT"].copy()
         if len(pt_candidates) >= 2:
             pair_rows = []
@@ -681,13 +675,11 @@ def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.Data
         emp = entry["employee"]
         dates = entry["dates"]
         absence_map.setdefault(emp, set()).update(dates)
-
         for d in dates:
             date_absent_people_map.setdefault(d, set()).add(emp)
 
     for entry in absence_entries:
         emp = entry["employee"]
-
         for d in entry["dates"]:
             mask = (df_after_absence["employee"] == emp) & (df_after_absence["date"] == d)
             missing_rows = df_after_absence[mask].copy()
@@ -705,7 +697,6 @@ def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.Data
             df_after_absence = df_after_absence[~mask].copy()
 
             absent_people_today = list(date_absent_people_map.get(d, set()))
-
             candidate_df, pair_df = find_best_candidates(
                 df_after_absence,
                 employees_df,
@@ -862,9 +853,7 @@ def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.Data
         pd.DataFrame(replacement_log, columns=REPLACEMENT_COLUMNS),
         pd.DataFrame(catchup_log, columns=CATCHUP_COLUMNS)
     )
-
-
-# -----------------------------------
+                                        # -----------------------------------
 # Základné nastavenie mesiaca
 # -----------------------------------
 employees_df = pd.DataFrame(EMPLOYEES)
@@ -878,7 +867,6 @@ selected_month = top2.selectbox(
 )
 selected_month_num = [m for m, v in MONTH_NAME_SK.items() if v == selected_month][0]
 start_d, end_d = month_start_end(selected_year, selected_month_num)
-
 
 # -----------------------------------
 # Sekcia dostupnosti hore
@@ -1001,7 +989,6 @@ st.dataframe(
     hide_index=True
 )
 
-
 # -----------------------------------
 # Vytvorenie baseline plánu
 # -----------------------------------
@@ -1009,7 +996,6 @@ base_df, planner_warnings_df = generate_monthly_schedule(
     selected_year, selected_month_num, employees_df, availability_map, target_hours_map
 )
 baseline_heatmap = make_heatmap_df(base_df, selected_year, selected_month_num)
-
 
 # -----------------------------------
 # Stav filtrov a simulácie bez sidebaru
@@ -1101,6 +1087,7 @@ final_df, absence_df, replacement_df, catchup_df = apply_absences_and_replacemen
 )
 
 final_heatmap = make_heatmap_df(final_df, selected_year, selected_month_num)
+
 # -----------------------------------
 # KPI
 # -----------------------------------
