@@ -198,27 +198,33 @@ def projected_consecutive(last_date, current_date, current_consecutive):
     return 1
 
 
-def make_heatmap_df(source_df: pd.DataFrame, year: int, month: int):
+def make_heatmap_df(source_df: pd.DataFrame, year: int, month: int, vacation_days_map: dict | None = None):
     start_d, end_d = month_start_end(year, month)
     dates = pd.date_range(start_d, end_d, freq="D")
 
     rows = []
-    for dts in dates:
-        d = dts.date()
-        actual = source_df[source_df["date"] == d]["employee"].nunique()
-        required = day_requirement(d)
-        preferred = preferred_extra_headcount(d)
-        rows.append({
-            "date": d,
-            "day": d.day,
-            "weekday": weekday_short_sk(d),
-            "actual": actual,
-            "required": required,
-            "preferred": preferred,
-            "score": staffing_score_color(actual, required),
-            "label": staffing_label(actual, required)
-        })
-    return pd.DataFrame(rows)
+for dts in dates:
+    d = dts.date()
+    actual = source_df[source_df["date"] == d]["employee"].nunique()
+    required = day_requirement(d)
+    preferred = preferred_extra_headcount(d)
+
+    vacation_count = 0
+    if vacation_days_map is not None:
+        vacation_count = sum(1 for emp, vac_days in vacation_days_map.items() if d in vac_days)
+
+    rows.append({
+        "date": d,
+        "day": d.day,
+        "weekday": weekday_short_sk(d),
+        "actual": actual,
+        "required": required,
+        "preferred": preferred,
+        "vacation_count": vacation_count,
+        "score": staffing_score_color(actual, required),
+        "label": staffing_label(actual, required)
+    })
+return pd.DataFrame(rows)
 
 
 def render_heatmap(heatmap_df: pd.DataFrame, title: str):
@@ -227,15 +233,24 @@ def render_heatmap(heatmap_df: pd.DataFrame, title: str):
         return
 
     z = [heatmap_df["score"].tolist()]
-    cell_text = [[f"{row['actual']}/{row['required']}" for _, row in heatmap_df.iterrows()]]
-    hover_text = [[
-        f"{row['date']}<br>Deň: {row['day']} ({weekday_short_sk(row['date'])})"
-        f"<br>Ľudia: {row['actual']}"
-        f"<br>Min: {row['required']}"
-        f"<br>Preferované: {row['preferred']}"
-        f"<br>Stav: {row['label']}"
-        for _, row in heatmap_df.iterrows()
-    ]]
+    cell_text = [[
+    f"{row['actual']}/{row['required']}" + (
+        f"<br>D:{int(row['vacation_count'])}" if "vacation_count" in heatmap_df.columns and row["vacation_count"] > 0 else ""
+    )
+    for _, row in heatmap_df.iterrows()
+]]
+   hover_text = [[
+    f"{row['date']}<br>Deň: {row['day']} ({weekday_short_sk(row['date'])})"
+    f"<br>Ľudia: {row['actual']}"
+    f"<br>Min: {row['required']}"
+    f"<br>Preferované: {row['preferred']}"
+    + (
+        f"<br>Na dovolenke: {int(row['vacation_count'])}"
+        if "vacation_count" in heatmap_df.columns and row["vacation_count"] > 0 else ""
+    )
+    + f"<br>Stav: {row['label']}"
+    for _, row in heatmap_df.iterrows()
+]]
     tick_text = [f"{row['day']}<br>{weekday_short_sk(row['date'])}" for _, row in heatmap_df.iterrows()]
 
     fig = go.Figure(data=go.Heatmap(
@@ -328,6 +343,21 @@ def build_availability_and_targets(year: int, month: int, employees_df: pd.DataF
         })
 
     return availability_map, unavailable_map, target_hours_map, pd.DataFrame(rows)
+
+def build_vacation_days_map(employee_settings: dict, start_d: date, end_d: date):
+    vacation_days_map = {}
+
+    for emp, settings in employee_settings.items():
+        vacation_days = set()
+
+        if settings["active"]:
+            for vac_start, vac_end in settings["vacations"]:
+                vac_start, vac_end = normalize_range((vac_start, vac_end), start_d, end_d)
+                vacation_days.update(daterange_to_set(vac_start, vac_end))
+
+        vacation_days_map[emp] = vacation_days
+
+    return vacation_days_map
 
 
 def initialize_stats(employees_df: pd.DataFrame):
@@ -946,6 +976,8 @@ for emp in employees_df["name"]:
         "vacations": vacations
     }
 
+vacation_days_map = build_vacation_days_map(employee_settings, start_d, end_d)
+
 availability_map, unavailable_map, target_hours_map, availability_summary_df = build_availability_and_targets(
     selected_year, selected_month_num, employees_df, employee_settings
 )
@@ -1047,7 +1079,12 @@ if absence_entries:
     )
     after_absence_df = after_absence_df[~mask_absence].copy()
 
-after_absence_heatmap = make_heatmap_df(after_absence_df, selected_year, selected_month_num)
+after_absence_heatmap = make_heatmap_df(
+    after_absence_df,
+    selected_year,
+    selected_month_num,
+    vacation_days_map=vacation_days_map
+)
 
 # -----------------------------------
 # Výpadok + náhrady + dobehnutie
@@ -1081,7 +1118,7 @@ else:
 # -----------------------------------
 st.subheader("3. Heatmapy pokrytia")
 render_heatmap(baseline_heatmap, "1. Základný plán podľa dostupnosti")
-render_heatmap(after_absence_heatmap, "2. Stav po výpadku")
+render_heatmap(after_absence_heatmap, "2. Stav po výpadku (D = počet ľudí na dovolenke)")
 render_heatmap(final_heatmap, "3. Stav po náhradách a dobehnutí hodín")
 
 # -----------------------------------
