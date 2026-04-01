@@ -232,29 +232,36 @@ def render_heatmap(heatmap_df: pd.DataFrame, title: str):
         st.info("Pre tento výber nie sú dáta.")
         return
 
-    z = [heatmap_df["score"].tolist()]
     cell_text = [[
-    f"{row['actual']}/{row['required']}" + (
-        f"<br>D:{int(row['vacation_count'])}" if "vacation_count" in heatmap_df.columns and row["vacation_count"] > 0 else ""
-    )
-    for _, row in heatmap_df.iterrows()
-]]
-   hover_text = [[
-    f"{row['date']}<br>Deň: {row['day']} ({weekday_short_sk(row['date'])})"
-    f"<br>Ľudia: {row['actual']}"
-    f"<br>Min: {row['required']}"
-    f"<br>Preferované: {row['preferred']}"
-    + (
-        f"<br>Na dovolenke: {int(row['vacation_count'])}"
-        if "vacation_count" in heatmap_df.columns and row["vacation_count"] > 0 else ""
-    )
-    + f"<br>Stav: {row['label']}"
-    for _, row in heatmap_df.iterrows()
-]]
-    tick_text = [f"{row['day']}<br>{weekday_short_sk(row['date'])}" for _, row in heatmap_df.iterrows()]
+        f"{row['actual']}/{row['required']}" + (
+            f"<br>D:{int(row['vacation_count'])}"
+            if "vacation_count" in heatmap_df.columns and row["vacation_count"] > 0
+            else ""
+        )
+        for _, row in heatmap_df.iterrows()
+    ]]
+
+    hover_text = [[
+        f"{row['date']}<br>Deň: {row['day']} ({weekday_short_sk(row['date'])})"
+        f"<br>Ľudia: {row['actual']}"
+        f"<br>Min: {row['required']}"
+        f"<br>Preferované: {row['preferred']}"
+        + (
+            f"<br>Na dovolenke: {int(row['vacation_count'])}"
+            if "vacation_count" in heatmap_df.columns and row["vacation_count"] > 0
+            else ""
+        )
+        + f"<br>Stav: {row['label']}"
+        for _, row in heatmap_df.iterrows()
+    ]]
+
+    tick_text = [
+        f"{row['day']}<br>{weekday_short_sk(row['date'])}"
+        for _, row in heatmap_df.iterrows()
+    ]
 
     fig = go.Figure(data=go.Heatmap(
-        z=z,
+        z=[heatmap_df["score"].tolist()],
         x=heatmap_df["day"].tolist(),
         y=["Pokrytie"],
         text=cell_text,
