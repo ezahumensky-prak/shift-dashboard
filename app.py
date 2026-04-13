@@ -127,15 +127,92 @@ def desired_day_mix(d: date):
     return ["FT", "FT", "PT", "PT", "BR"]
 
 
-def employee_shift_template(name: str, parity: int):
+def employee_shift_template(name: str, parity: int, forced_shift: str | None = None):
     t = get_employee_type(name)
     if t == "FT":
         return {"group": "Fulltime", "start_hour": 9, "end_hour": 21, "hours": 12}
     if t == "PT":
         return {"group": "Parttime", "start_hour": 12, "end_hour": 17, "hours": 5}
-    if parity % 2 == 0:
+
+    shift_type = forced_shift
+    if shift_type not in {"morning", "evening"}:
+        shift_type = "morning" if parity % 2 == 0 else "evening"
+
+    if shift_type == "morning":
         return {"group": "Brigádnik ráno", "start_hour": 9, "end_hour": 13, "hours": 4}
     return {"group": "Brigádnik večer", "start_hour": 17, "end_hour": 21, "hours": 4}
+
+
+def brigadnik_shift_balance_for_day(day_records) -> tuple[int, int]:
+    morning = 0
+    evening = 0
+
+    for record in day_records:
+        if get_employee_type(record["employee"]) != "BR":
+            continue
+
+        start_value = record["start"]
+        start_hour = start_value.hour if hasattr(start_value, "hour") else pd.Timestamp(start_value).hour
+        if start_hour < 15:
+            morning += 1
+        else:
+            evening += 1
+
+    return morning, evening
+
+
+
+def determine_brigadnik_shift_type(day_records, emp: str, day_index: int, stats: dict):
+    if get_employee_type(emp) != "BR":
+        return None
+
+    morning_count, evening_count = brigadnik_shift_balance_for_day(day_records)
+    if morning_count > evening_count:
+        return "evening"
+    if evening_count > morning_count:
+        return "morning"
+
+    parity = day_index + stats[emp]["shifts"]
+    return "morning" if parity % 2 == 0 else "evening"
+
+
+
+def find_brigadnik_daily_conflicts(source_df: pd.DataFrame) -> pd.DataFrame:
+    if source_df.empty:
+        return pd.DataFrame(columns=["date", "morning_brigadnici", "evening_brigadnici", "issue"])
+
+    brigadnici_df = source_df[source_df["employee"].apply(get_employee_type) == "BR"].copy()
+    if brigadnici_df.empty:
+        return pd.DataFrame(columns=["date", "morning_brigadnici", "evening_brigadnici", "issue"])
+
+    brigadnici_df["shift_side"] = brigadnici_df["start"].apply(
+        lambda value: "morning" if pd.Timestamp(value).hour < 15 else "evening"
+    )
+
+    summary = brigadnici_df.pivot_table(
+        index="date",
+        columns="shift_side",
+        values="employee",
+        aggfunc="count",
+        fill_value=0
+    ).reset_index()
+
+    if "morning" not in summary.columns:
+        summary["morning"] = 0
+    if "evening" not in summary.columns:
+        summary["evening"] = 0
+
+    summary = summary.rename(columns={
+        "morning": "morning_brigadnici",
+        "evening": "evening_brigadnici"
+    })
+
+    summary["issue"] = summary.apply(
+        lambda row: "Viac ako 1 ranný brigádnik" if row["morning_brigadnici"] > 1 else "",
+        axis=1
+    )
+
+    return summary[summary["issue"] != ""].sort_values("date").reset_index(drop=True)
 
 
 def staffing_score_color(actual: int, required: int):
@@ -376,7 +453,9 @@ def initialize_stats(employees_df: pd.DataFrame):
 
 def add_shift_record(shifts: list, emp: str, d: date, day_index: int, stats: dict, assignment_source: str = "Plán"):
     parity = day_index + stats[emp]["shifts"]
-    tpl = employee_shift_template(emp, parity)
+    same_day_records = [shift for shift in shifts if shift["date"] == d]
+    forced_shift = determine_brigadnik_shift_type(same_day_records, emp, day_index, stats)
+    tpl = employee_shift_template(emp, parity, forced_shift=forced_shift)
     start_dt = datetime.combine(d, datetime.min.time()).replace(hour=tpl["start_hour"])
     end_dt = datetime.combine(d, datetime.min.time()).replace(hour=tpl["end_hour"])
 
@@ -821,7 +900,14 @@ def apply_absences_and_replacements(df_base: pd.DataFrame, employees_df: pd.Data
                 if daily_people >= preferred_extra_headcount(d):
                     continue
 
-                tpl = employee_shift_template(emp, 0)
+                same_day_records = df_after_absence[df_after_absence["date"] == d][["employee", "start"]].to_dict("records")
+                forced_shift = determine_brigadnik_shift_type(
+                    same_day_records,
+                    emp,
+                    0,
+                    {emp: {"shifts": int(df_after_absence[df_after_absence["employee"] == emp].shape[0])}}
+                )
+                tpl = employee_shift_template(emp, 0, forced_shift=forced_shift)
                 df_after_absence = pd.concat([
                     df_after_absence,
                     pd.DataFrame([{
@@ -1087,6 +1173,17 @@ final_df, absence_df, replacement_df, catchup_df = apply_absences_and_replacemen
 )
 
 final_heatmap = make_heatmap_df(final_df, selected_year, selected_month_num)
+brigadnik_conflicts_df = find_brigadnik_daily_conflicts(final_df)
+
+# -----------------------------------
+# Kontrola brigádnických smien
+# -----------------------------------
+st.subheader("Kontrola brigádnických smien")
+if brigadnik_conflicts_df.empty:
+    st.success("Nenašiel sa žiadny deň, kde by boli naraz aspoň 2 ranní brigádnici.")
+else:
+    st.warning("Našli sa dni, kde sa stretli minimálne 2 ranní brigádnici.")
+    st.dataframe(brigadnik_conflicts_df, use_container_width=True, hide_index=True)
 
 # -----------------------------------
 # KPI
