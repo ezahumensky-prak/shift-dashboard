@@ -1089,8 +1089,8 @@ baseline_heatmap = make_heatmap_df(base_df, selected_year, selected_month_num)
 if "calendar_focus_day" not in st.session_state or not (start_d <= st.session_state["calendar_focus_day"] <= end_d):
     st.session_state["calendar_focus_day"] = start_d
 
-if "calendar_view_mode" not in st.session_state:
-    st.session_state["calendar_view_mode"] = "Celý mesiac"
+if "calendar_view_mode" not in st.session_state or st.session_state["calendar_view_mode"] not in ["Denný", "Mesačný"]:
+    st.session_state["calendar_view_mode"] = "Mesačný"
 
 selected_day = st.session_state["calendar_focus_day"]
 view_mode = st.session_state["calendar_view_mode"]
@@ -1409,7 +1409,7 @@ f1, f2 = st.columns([1, 1])
 
 f1.selectbox(
     "Pohľad kalendára",
-    ["Denný", "Týždenný", "Mesačný", "Celý mesiac"],
+    ["Denný", "Mesačný"],
     key="calendar_view_mode"
 )
 
@@ -1427,10 +1427,6 @@ selected_day = st.session_state["calendar_focus_day"]
 
 if view_mode == "Denný":
     plot_df = plot_df[plot_df["date"] == selected_day].copy()
-elif view_mode == "Týždenný":
-    start_week = selected_day - timedelta(days=selected_day.weekday())
-    end_week = start_week + timedelta(days=6)
-    plot_df = plot_df[(plot_df["date"] >= start_week) & (plot_df["date"] <= end_week)].copy()
 elif view_mode == "Mesačný":
     plot_df = plot_df[
         plot_df["date"].apply(lambda d: d.month == selected_month_num and d.year == selected_year)
